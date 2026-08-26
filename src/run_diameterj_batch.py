@@ -127,7 +127,14 @@ def run_diameterj(
         values = np.unique(pixels)
         if pixels.ndim != 2 or not set(values.tolist()).issubset({0, 1, 254, 255}):
             raise SystemExit(f"{image}: DiameterJ input must be a 2-D binary TIFF")
-        black_fraction = float(np.mean(pixels == values.min()))
+        with tifffile.TiffFile(image) as tif:
+            photometric = tif.pages[0].photometric
+        black_value = (
+            values.max()
+            if photometric == tifffile.PHOTOMETRIC.MINISWHITE
+            else values.min()
+        )
+        black_fraction = float(np.mean(pixels == black_value))
         if black_fraction > 0.80:
             raise SystemExit(
                 f"{image}: {black_fraction:.1%} black pixels suggests reversed polarity; "

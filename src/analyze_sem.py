@@ -181,8 +181,15 @@ def summarize_fiji_mask(
         raw = raw[..., :3].mean(axis=-1)
     image = raw[: raw.shape[0] - args.crop_bottom or None].astype(np.float32)
     image = exposure.rescale_intensity(image, out_range=(0.0, 1.0))
-    pixels = tifffile.imread(mask_path)
-    mask = pixels == np.min(pixels)
+    with tifffile.TiffFile(mask_path) as tif:
+        pixels = tif.asarray()
+        photometric = tif.pages[0].photometric
+    fiber_value = (
+        np.max(pixels)
+        if photometric == tifffile.PHOTOMETRIC.MINISWHITE
+        else np.min(pixels)
+    )
+    mask = pixels == fiber_value
     px_um = args.pixel_size_um if args.pixel_size_um else args.hfw_um / raw.shape[1]
     skeleton = morphology.skeletonize(mask)
     distance = ndi.distance_transform_edt(mask)

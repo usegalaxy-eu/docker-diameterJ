@@ -26,7 +26,7 @@ Place input `.tif` or `.tiff` images in `data/`, then run:
 ```bash
 mkdir -p results
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -42,7 +42,7 @@ To process a single TIFF, provide its path inside the input mount:
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data/image.tif \
@@ -50,7 +50,7 @@ docker run --rm \
   --method otsu
 ```
 
-## Options
+## Segmentation modes
 
 Show all container command options:
 
@@ -58,12 +58,26 @@ Show all container command options:
 docker run --rm sem_diameterj:0.1 --help
 ```
 
-Available threshold methods are `otsu`, `li`, `yen`, and `triangle`. Run
-every method with:
+Select a workflow with `--segmentation`:
+
+| Mode | Processing | Masks per image |
+| --- | --- | ---: |
+| `python` | Python preprocessing followed by one or all Python thresholds | 1 or 4 |
+| `traditional` | Fiji Auto Threshold applied directly to the cropped image | 8 |
+| `mixed` | One Fiji SRM pass followed by four thresholds | 4 |
+| `srm` | Two recursive Fiji SRM sequences followed by four thresholds each | 8 |
+| `all` | Traditional, Mixed, and recursive SRM | 20 |
+
+The default mode is `python`.
+
+### Python segmentation
+
+Python segmentation supports `--method otsu`, `li`, `yen`, or `triangle`.
+Generate all four masks with:
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -71,14 +85,14 @@ docker run --rm \
   --all-methods
 ```
 
-### DiameterJ Traditional segmentation
+### Traditional segmentation
 
 Generate and analyze the eight original Traditional masks: Huang, Percentile,
 MinError(I), Triangle, Li, Otsu, MaxEntropy, and RenyiEntropy.
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -86,14 +100,16 @@ docker run --rm \
   --segmentation traditional
 ```
 
-### DiameterJ Mixed segmentation
+### Mixed segmentation
 
-Generate and analyze four masks by applying SRM with `q=100`, followed by
-Huang, MinError(I), Percentile, or Triangle thresholding.
+Mixed segmentation applies one Fiji Statistical Region Merging pass and then
+converts the resulting grayscale image into four binary masks using Huang,
+MinError(I), Percentile, and Triangle. The SRM pass uses `--srm-q 100` by
+default.
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -105,7 +121,7 @@ Set another SRM granularity with `--srm-q`, for example:
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -114,20 +130,33 @@ docker run --rm \
   --srm-q 50
 ```
 
-The default `--segmentation python` preserves the Python segmentation workflow
-used by `--method` and `--all-methods`.
+### Recursive SRM segmentation
 
-### Statistical Region Merging segmentation
+This mode runs DiameterJ's Fiji Statistical Region Merging branch. With the
+default `--srm-q 100`, it uses these two sequences:
 
-Run DiameterJ's Fiji Statistical Region Merging branch. With the default
-`--srm-q 100`, it produces four threshold masks after recursive SRM levels
-`q=100,50,25,12` and four more after levels `q=50,10`. Each group uses Huang,
-MinError(I), Percentile, and Triangle thresholding. Other starting values derive
-the recursive levels as `q`, `q/2`, `q/4`, `q/8`, and `q/10`.
+```text
+original → q=100 → q=50 → q=25 → q=12 → threshold
+original → q=50  → q=10                  → threshold
+```
+
+Each arrow is another SRM pass over the preceding pass's output. Each final
+image is thresholded with Huang, MinError(I), Percentile, and Triangle,
+producing eight masks.
+
+For another starting value `q`, the levels use integer division:
+
+```text
+q → q/2 → q/4 → q/8
+q/2 → q/10
+```
+
+Every derived value has a minimum of `1`. Higher `q` values generally preserve
+more regions; lower values generally produce coarser regions.
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -138,23 +167,33 @@ docker run --rm \
 Use `--segmentation all` to generate Traditional, Mixed, and SRM masks in one
 run.
 
-Common analysis options:
+## Analysis options
+
+Options used by every segmentation mode:
 
 - `--crop-bottom N`: remove an instrument footer of `N` pixels; default `59`.
 - `--hfw-um N`: horizontal field width in micrometres; default `27.04`.
 - `--pixel-size-um N`: use a known pixel size instead of HFW calibration.
+- `--skip-diameterj`: generate segmentation and Python QC outputs only.
+
+Options used only by `--segmentation python`:
+
+- `--method NAME`: use `otsu`, `li`, `yen`, or `triangle`; default `otsu`.
+- `--all-methods`: generate all four Python threshold masks.
 - `--sigma N`: Gaussian denoising sigma; default `1.0`.
 - `--min-object-px N`: minimum retained object size; default `25`.
 - `--min-hole-px N`: minimum filled hole size; default `25`.
-- `--srm-q N`: SRM granularity for Mixed and SRM modes; default `100`.
 - `--invert`: use for fibers darker than the background.
-- `--skip-diameterj`: generate segmentation and Python QC outputs only.
+
+Option used by `--segmentation mixed`, `srm`, and `all`:
+
+- `--srm-q N`: positive SRM granularity value; default `100`.
 
 Example with custom calibration and footer height:
 
 ```bash
 docker run --rm \
-  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/results:/app/results" \
   sem_diameterj:0.1 \
   --input /app/data \
@@ -168,7 +207,10 @@ docker run --rm \
 
 The mounted `results/` directory receives:
 
-- `*__<method>.tif`: binary DiameterJ input masks
+- `*__<method>.tif`: Python binary masks
+- `*__traditional_<method>.tif`: Traditional masks
+- `*__mixed_q<q>_<method>.tif`: Mixed masks
+- `*__srm_q<levels>_<method>.tif`: recursive SRM masks
 - `*_Compare.png`: DiameterJ comparison panels
 - `*_Total Summary.csv`: DiameterJ summary measurements
 - `*_Pore Data.csv`: DiameterJ pore measurements

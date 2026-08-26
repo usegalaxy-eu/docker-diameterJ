@@ -2,7 +2,6 @@
 .gitignore
 .venv
 packages
-data
 results
 __pycache__
 **/__pycache__

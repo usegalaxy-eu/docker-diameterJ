@@ -1,39 +1,27 @@
-# SEM fiber diameter analysis with Fiji and DiameterJ
+# DiameterJ Docker image
 
-This project prepares SEM TIFF images for measurement with the DiameterJ plugin
-in Fiji/ImageJ. It also writes an independent Python skeleton/distance-transform
-estimate for quality control (QC). The QC estimate is **not** a replacement for
-the validated DiameterJ result.
+This image prepares SEM TIFF images, runs DiameterJ v1.018 in a compatible
+Fiji/ImageJ environment, and writes DiameterJ results plus Python QC outputs.
 
-## Setup
+## Build
 
-Fiji 2017 and DiameterJ v1.018 are downloaded and checksum-verified while the
-Docker image is built. They are deliberately not stored in this repository.
-Build the image from this directory:
+From this directory:
 
 ```bash
 docker build -t sem_diameterj:0.1 .
 ```
 
-The pinned Fiji Life-Line build provides ImageJ 1.51n, which is compatible with
-the legacy DiameterJ macro. Current Fiji/ImageJ releases are not used because
-their `ResultsTable` behavior differs during DiameterJ's `Summarize` step.
+The build downloads and SHA-256 verifies these pinned packages:
 
-For local development outside Docker, install [Fiji](https://fiji.sc/) and
-DiameterJ v1.018 following the
-[DiameterJ installation page](https://imagej.net/plugins/diameterj), then
-create a Python environment:
+- Fiji Life-Line Linux 64-bit, 2017-05-30 (ImageJ 1.51n)
+- DiameterJ for Fiji v1.018
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
+The packages are installed in the image and do not need to be stored in the
+repository.
 
-## Run the complete analysis
+## Run
 
-The main script creates the mask and immediately runs the compatible Fiji and
-DiameterJ analysis. From the project directory, run:
+Place input `.tif` or `.tiff` images in `data/`, then run:
 
 ```bash
 mkdir -p results
@@ -46,11 +34,32 @@ docker run --rm \
   --method otsu
 ```
 
-The entrypoint detects the owner of the mounted `results/` directory, so
-`PUID` and `PGID` are not required. The input mount is read-only, while the
-output mount keeps generated files after the container exits.
+The input mount is read-only. The output mount preserves generated files after
+the container exits. The entrypoint uses the owner of the mounted `results/`
+directory, so UID and GID environment variables are not required.
 
-To run every supported threshold method:
+To process a single TIFF, provide its path inside the input mount:
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data/image.tif \
+  --output /app/results \
+  --method otsu
+```
+
+## Options
+
+Show all container command options:
+
+```bash
+docker run --rm sem_diameterj:0.1 --help
+```
+
+Available threshold methods are `otsu`, `li`, `yen`, and `triangle`. Run
+every method with:
 
 ```bash
 docker run --rm \
@@ -62,76 +71,54 @@ docker run --rm \
   --all-methods
 ```
 
-All masks, overlays, QC tables, DiameterJ comparison images, histograms, and
-summaries are written directly into `results/`. Use `--all-methods` only when
-you intentionally want DiameterJ to analyze every threshold candidate. Use
-`--skip-diameterj` to create masks and Python QC files without launching Fiji.
+Common analysis options:
 
-The combined workflow intentionally runs DiameterJ v1.018 in pixel units. Its
-legacy particle filtering changes when calibration is applied internally. Use
-the per-image `pixel_size_um` recorded in `results/python_qc_summary.csv` to
-convert the reported DiameterJ pixel measurements to µm. Images with different
-widths or calibrations can therefore be processed in the same batch.
+- `--crop-bottom N`: remove an instrument footer of `N` pixels; default `59`.
+- `--hfw-um N`: horizontal field width in micrometres; default `27.04`.
+- `--pixel-size-um N`: use a known pixel size instead of HFW calibration.
+- `--sigma N`: Gaussian denoising sigma; default `1.0`.
+- `--min-object-px N`: minimum retained object size; default `25`.
+- `--min-hole-px N`: minimum filled hole size; default `25`.
+- `--invert`: use for fibers darker than the background.
+- `--skip-diameterj`: generate segmentation and Python QC outputs only.
 
-The defaults match `data/PVA-A_004.tif`: 59 footer pixels are removed and the
-27.04 µm horizontal field width over 1024 pixels gives 0.02640625 µm/px. For a
-different acquisition, pass its own values, for example:
+Example with custom calibration and footer height:
 
 ```bash
-python src/analyze_sem.py --input data --crop-bottom 70 --hfw-um 50
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --method yen \
+  --crop-bottom 70 \
+  --hfw-um 50
 ```
-
-If calibrated pixel size is known directly, prefer `--pixel-size-um`. Use
-`--invert` only for dark fibers on a bright background. Never infer scale from
-the TIFF's nominal X/Y resolution: SEM exporters often store a display value
-rather than specimen calibration.
-
-Inspect every `results/*_overlay.png` and select the mask whose red boundary
-best follows real fiber edges, without joining nearby fibers or filling pores.
-Do not select a threshold based on which one gives the desired diameter.
-
-## Optional manual review and rerun
-
-For each accepted binary TIFF:
-
-1. Confirm under **Analyze > Set Scale** that distance in pixels is used. This
-   preserves DiameterJ's native output and avoids plugin-version scale issues.
-2. Run **Plugins > DiameterJ > DiameterJ** (the exact menu label can vary by
-   DiameterJ package), choose the binary-image analysis path, and save its full
-   output into `results/diameterj/<image-name>/`.
-3. Convert reported pixel diameters to µm by multiplying by `pixel_size_um` in
-   `results/python_qc_summary.csv`. For this sample, multiply by `0.02640625`.
-4. Compare DiameterJ's distribution with `results/*_diameters.csv`. Large disagreement
-   usually indicates poor segmentation, crossings, edge fibers, or scale error.
-
-The standalone DiameterJ wrapper remains available when you want to review or
-manually select masks before measurement:
-
-```bash
-python src/run_diameterj_batch.py \
-  --input results/selected_masks \
-  --pixel-size-um 0.02640625
-```
-
-DiameterJ writes its `*_Compare.png`, summary CSVs, and histogram files directly
-inside the selected-mask directory. Fiji's window opens, but the
-analysis itself needs no clicks. DiameterJ v1.018's legacy AnalyzeSkeleton
-dependency does not reliably publish its Results table in true headless mode;
-therefore GUI-backed execution is the default. The wrapper generates
-`results/generated_diameterj_batch.ijm`; it does not edit the installed vendor
-macro. It intentionally uses the preserved May 2017 Fiji Life-Line build,
-matching ImageJ 1.51n used for the supplied reference outputs; current Fiji is
-not table-compatible with DiameterJ v1.018.
-
-DiameterJ documentation warns that fibers below 10 px or above 10% of the
-smallest image dimension can exceed 10% measurement error. With this sample's
-calibration, 10 px is 0.2641 µm. Report the segmentation method, calibration,
-number of images/fields, exclusion rules, and distribution (median/IQR as well
-as mean/SD), not only a single mean diameter.
 
 ## Outputs
 
-- `results/*__<method>.tif`: binary inputs for DiameterJ
-- `results/*_overlay.png`: segmentation boundary overlays for visual review
-- `results/*_diameters.csv`: per-skeleton-pixel QC diameters
-- `results/python_qc_summary.csv`: calibration and QC summary/audit trail
+The mounted `results/` directory receives:
+
+- `*__<method>.tif`: binary DiameterJ input masks
+- `*_Compare.png`: DiameterJ comparison panels
+- `*_Total Summary.csv`: DiameterJ summary measurements
+- `*_Pore Data.csv`: DiameterJ pore measurements
+- `*_Radius Histo.csv` and `*_Radius Plot.tif`: diameter distributions
+- `*_overlay.png`: segmentation boundary overlays
+- `*_diameters.csv`: Python QC diameter samples
+- `python_qc_summary.csv`: calibration and QC summary
+
+## Build-time package overrides
+
+The package locations and checksums are Docker build arguments. Override a
+package only together with its matching checksum:
+
+```bash
+docker build -t sem_diameterj:0.1 \
+  --build-arg FIJI_URL=https://example.invalid/fiji.zip \
+  --build-arg FIJI_SHA256=<sha256> \
+  --build-arg DIAMETERJ_URL=https://example.invalid/diameterj.zip \
+  --build-arg DIAMETERJ_SHA256=<sha256> \
+  .
+```

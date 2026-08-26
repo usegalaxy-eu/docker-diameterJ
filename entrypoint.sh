@@ -10,29 +10,12 @@ case "${1:-}" in
         ;;
 esac
 
-display_number="${DISPLAY#:}"
-display_number="${display_number%%.*}"
-Xvfb ":${display_number}" -screen 0 1280x1024x24 -nolisten tcp &
-xvfb_pid=$!
-trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT INT TERM
+Xvfb "$DISPLAY" -screen 0 1280x1024x24 -nolisten tcp &
 
 results_dir="${ANALYSIS_RESULTS_DIR:-/app/results}"
-if [ "$(id -u)" = "0" ]; then
-    if [ -n "${PUID:-}" ]; then
-        run_uid="$PUID"
-    elif [ -e "$results_dir" ]; then
-        run_uid="$(stat -c %u "$results_dir")"
-    else
-        run_uid=1000
-    fi
-    if [ -n "${PGID:-}" ]; then
-        run_gid="$PGID"
-    elif [ -e "$results_dir" ]; then
-        run_gid="$(stat -c %g "$results_dir")"
-    else
-        run_gid="$run_uid"
-    fi
-
+if [ "$(id -u)" = "0" ] && [ -e "$results_dir" ]; then
+    run_uid="$(stat -c %u "$results_dir")"
+    run_gid="$(stat -c %g "$results_dir")"
     runtime_home="/tmp/sem-analysis-${run_uid}"
     mkdir -p "$runtime_home"
     chown "$run_uid:$run_gid" "$runtime_home"

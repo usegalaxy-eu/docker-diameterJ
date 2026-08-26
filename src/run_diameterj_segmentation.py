@@ -9,6 +9,7 @@ import tempfile
 import time
 
 import tifffile
+from PIL import Image
 
 from run_diameterj_batch import DEFAULT_FIJI, ij_quote
 
@@ -25,11 +26,18 @@ TRADITIONAL_METHODS = (
     ("T7", "maxentropy"),
     ("T8", "renyientropy"),
 )
-MIXED_METHODS = (
+THRESHOLD_METHODS = ("huang", "minerror", "percentile", "triangle")
+MIXED_SRM_METHODS = (
     ("M1", "huang"),
     ("M2", "minerror"),
     ("M3", "percentile"),
     ("M4", "triangle"),
+)
+MIXED_DIRECT_METHODS = (
+    ("M5", "huang"),
+    ("M6", "minerror"),
+    ("M7", "percentile"),
+    ("M8", "triangle"),
 )
 
 
@@ -106,6 +114,43 @@ srm_q_tenth = {q_tenth};
         "q=12 showaverages", 'q="+srm_q_eighth+" showaverages'
     )
     generated = generated.replace("q=10 showaverages", 'q="+srm_q_tenth+" showaverages')
+    # Fiji uses the opened filename as each montage label. Replace DiameterJ's
+    # opaque T/M/S codes with the actual segmentation method names.
+    generated = generated.replace(
+        'open(dir1+name0);\n\t\t\trun("Invert");',
+        'open(dir1+name0);\n\t\t\trename("Original");\n\t\t\trun("Invert");',
+    )
+    montage_labels = {
+        1: 'Mixed SRM q="+srm_q+" Huang',
+        3: 'Mixed SRM q="+srm_q+" MinError',
+        4: 'Mixed SRM q="+srm_q+" Percentile',
+        5: 'Mixed SRM q="+srm_q+" Triangle',
+        6: "Mixed Direct Huang",
+        7: "Mixed Direct MinError",
+        8: "Mixed Direct Percentile",
+        9: "Mixed Direct Triangle",
+        13: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Huang',
+        14: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" MinError',
+        15: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Percentile',
+        16: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Triangle',
+        17: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Huang',
+        18: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" MinError',
+        19: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Percentile',
+        20: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Triangle',
+        23: "Traditional Huang",
+        24: "Traditional Percentile",
+        25: "Traditional MinError",
+        26: "Traditional Triangle",
+        27: "Traditional Li",
+        28: "Traditional Otsu",
+        29: "Traditional MaxEntropy",
+        30: "Traditional RenyiEntropy",
+    }
+    for path_number, label in montage_labels.items():
+        generated = generated.replace(
+            f'open(path{path_number}+".tif");',
+            f'open(path{path_number}+".tif"); rename("{label}");',
+        )
     # The SRM branch repeatedly saves intermediate images to the same path.
     # ImageJ's unattended save does not reliably overwrite, so delete the old
     # intermediate before each save.
@@ -151,7 +196,12 @@ def run_fiji_segmentation(
         )
     if mixed:
         methods.extend(
-            (code, "mixed", f"q{srm_q}_{name}") for code, name in MIXED_METHODS
+            (code, "mixed", f"srm_q{srm_q}_{name}")
+            for code, name in MIXED_SRM_METHODS
+        )
+        methods.extend(
+            (code, "mixed", f"direct_{name}")
+            for code, name in MIXED_DIRECT_METHODS
         )
     if srm:
         q_half = max(1, srm_q // 2)
@@ -160,9 +210,9 @@ def run_fiji_segmentation(
         q_tenth = max(1, srm_q // 10)
         first = f"q{srm_q}_{q_half}_{q_quarter}_{q_eighth}"
         second = f"q{q_half}_{q_tenth}"
-        for code, name in MIXED_METHODS:
-            methods.append((f"S{int(code[1:])}", "srm", f"{first}_{name}"))
-            methods.append((f"S{int(code[1:]) + 4}", "srm", f"{second}_{name}"))
+        for index, name in enumerate(THRESHOLD_METHODS, start=1):
+            methods.append((f"S{index}", "srm", f"{first}_{name}"))
+            methods.append((f"S{index + 4}", "srm", f"{second}_{name}"))
         methods.sort(key=lambda item: (item[1], item[0]))
 
     work_dir = Path(tempfile.mkdtemp(prefix=".diameterj_segment_", dir=output_dir))
@@ -185,6 +235,14 @@ def run_fiji_segmentation(
         )
         segmented = work_dir / "Segmented Images"
         expected = [segmented / f"{image.stem}_{code}.tif" for code, _, _ in methods]
+        montage_names = {
+            "traditional": "Trad Montage",
+            "mixed": "Mix Montage",
+            "srm": "SRM Montage",
+            "all": "Trad&Mix&SRM Montage",
+        }
+        montage = work_dir / "Montage Images" / f"{image.stem}_{montage_names[mode]}.png"
+        expected.append(montage)
         command = [str(fiji), "-macro", str(generated)]
         process = subprocess.Popen(command)
         deadline = time.monotonic() + float(
@@ -211,10 +269,13 @@ def run_fiji_segmentation(
                     process.wait()
 
         results = []
-        for source_mask, (_, family, method) in zip(expected, methods):
+        for source_mask, (_, family, method) in zip(expected[:-1], methods):
             destination = output_dir / f"{image.stem}__{family}_{method}.tif"
             shutil.copy2(source_mask, destination)
+            mask_pixels = tifffile.imread(source_mask)
+            Image.fromarray(255 - mask_pixels).save(destination.with_suffix(".png"))
             results.append((destination, family, method))
+        shutil.copy2(montage, output_dir / f"{image.stem}__{mode}_montage.png")
         return results
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

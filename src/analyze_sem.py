@@ -148,6 +148,7 @@ def process(path: Path, args: argparse.Namespace, method: str) -> dict[str, obje
     tifffile.imwrite(
         mask_path, (~mask).astype(np.uint8) * 255, photometric="miniswhite"
     )
+    Image.fromarray(mask.astype(np.uint8) * 255).save(args.output / f"{stem}.png")
     Image.fromarray(overlay(image, mask)).save(args.output / f"{stem}_overlay.png")
     pd.DataFrame({"diameter_px": diam_px, "diameter_um": diam_um}).to_csv(
         args.output / f"{stem}_diameters.csv", index=False

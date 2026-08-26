@@ -64,9 +64,9 @@ Select a workflow with `--segmentation`:
 | --- | --- | ---: |
 | `python` | Python preprocessing followed by one or all Python thresholds | 1 or 4 |
 | `traditional` | Fiji Auto Threshold applied directly to the cropped image | 8 |
-| `mixed` | One Fiji SRM pass followed by four thresholds | 4 |
+| `mixed` | Four SRM-plus-threshold masks and four direct companion masks | 8 |
 | `srm` | Two recursive Fiji SRM sequences followed by four thresholds each | 8 |
-| `all` | Traditional, Mixed, and recursive SRM | 20 |
+| `all` | Traditional, Mixed, and recursive SRM | 24 |
 
 The default mode is `python`.
 
@@ -102,10 +102,10 @@ docker run --rm \
 
 ### Mixed segmentation
 
-Mixed segmentation applies one Fiji Statistical Region Merging pass and then
-converts the resulting grayscale image into four binary masks using Huang,
-MinError(I), Percentile, and Triangle. The SRM pass uses `--srm-q 100` by
-default.
+Mixed segmentation produces eight masks. `M1–M4` apply one Fiji Statistical
+Region Merging pass followed by Huang, MinError(I), Percentile, and Triangle.
+`M5–M8` are the original DiameterJ direct-threshold companion masks using the
+same four methods. The SRM passes use `--srm-q 100` by default.
 
 ```bash
 docker run --rm \
@@ -167,6 +167,24 @@ docker run --rm \
 Use `--segmentation all` to generate Traditional, Mixed, and SRM masks in one
 run.
 
+## Segmentation montages
+
+Every Fiji segmentation mode writes its separate binary masks as PNG and TIFF,
+plus one PNG montage containing the original image and all candidates:
+
+- `traditional`: original plus 8 masks in a 3 × 3 montage
+- `mixed`: original plus 8 masks in a 3 × 3 montage
+- `srm`: original plus 8 masks in a 3 × 3 montage
+- `all`: original plus 24 masks in a 5 × 5 montage
+
+Montages are named `<source>__<mode>_montage.png`. They provide a visual review
+sheet. Individual PNG masks are convenient for viewing and export; matching
+TIFF masks are retained because DiameterJ uses them for measurement. PNG
+pixels account for TIFF's `MINISWHITE` display convention, so PNG and TIFF
+viewers show the same regions with the same black/white colors. Montage panels
+use descriptive segmentation names instead of the original `T1`, `M1`, and
+`S1` codes.
+
 ## Analysis options
 
 Options used by every segmentation mode:
@@ -207,10 +225,12 @@ docker run --rm \
 
 The mounted `results/` directory receives:
 
-- `*__<method>.tif`: Python binary masks
-- `*__traditional_<method>.tif`: Traditional masks
-- `*__mixed_q<q>_<method>.tif`: Mixed masks
-- `*__srm_q<levels>_<method>.tif`: recursive SRM masks
+- `*__<mode>_montage.png`: original image and every mask for the selected mode
+- `*__<method>.{png,tif}`: Python binary masks
+- `*__traditional_<method>.{png,tif}`: Traditional masks
+- `*__mixed_srm_q<q>_<method>.{png,tif}`: SRM-plus-threshold Mixed masks
+- `*__mixed_direct_<method>.{png,tif}`: direct-threshold Mixed masks
+- `*__srm_q<levels>_<method>.{png,tif}`: recursive SRM masks
 - `*_Compare.png`: DiameterJ comparison panels
 - `*_Total Summary.csv`: DiameterJ summary measurements
 - `*_Pore Data.csv`: DiameterJ pore measurements

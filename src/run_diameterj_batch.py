@@ -6,8 +6,6 @@ on white background). DiameterJ writes its standard Summaries, Histograms,
 Diameter Analysis Images, and *_Compare.png outputs beside those images.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 from pathlib import Path

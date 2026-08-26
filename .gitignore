@@ -1,0 +1,6 @@
+packages/
+data/
+results/
+*.log
+__pycache__/
+*.py[cod]

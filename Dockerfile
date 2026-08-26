@@ -52,6 +52,7 @@ RUN mkdir -p /app/packages/fiji-2017 /tmp/diameterj-download \
     && test -f /app/packages/fiji-2017/Fiji.app/jars/ij-1.51n.jar \
     && test -f /app/packages/fiji-2017/Fiji.app/plugins/AnalyzeSkeleton_-3.1.2.jar \
     && test -f /app/packages/fiji-2017/Fiji.app/plugins/DiameterJ/DiameterJ_1-018.ijm \
+    && test -f /app/packages/fiji-2017/Fiji.app/plugins/DiameterJ/DiameterJ_Segment.ijm \
     && rm -rf /tmp/diameterj-download
 
 COPY src /app/src

@@ -20,6 +20,7 @@ from scipy import ndimage as ndi
 from skimage import exposure, filters, morphology
 
 from run_diameterj_batch import DEFAULT_FIJI, VENDOR_MACRO, run_diameterj
+from run_diameterj_segmentation import run_fiji_segmentation
 
 
 METHODS = ("otsu", "li", "yen", "triangle")
@@ -31,12 +32,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=Path, default=Path("results"))
     p.add_argument("--method", choices=METHODS, default="otsu")
     p.add_argument("--all-methods", action="store_true", help="write one candidate per global threshold")
+    p.add_argument(
+        "--segmentation",
+        choices=("python", "traditional", "mixed", "srm", "all"),
+        default="python",
+        help="segmentation workflow; Fiji modes generate all methods in that family",
+    )
     p.add_argument("--crop-bottom", type=int, default=59, help="instrument footer height in pixels")
     p.add_argument("--hfw-um", type=float, default=27.04, help="horizontal field width in micrometres")
     p.add_argument("--pixel-size-um", type=float, help="override HFW-derived calibration")
     p.add_argument("--sigma", type=float, default=1.0, help="Gaussian denoising sigma")
     p.add_argument("--min-object-px", type=int, default=25)
     p.add_argument("--min-hole-px", type=int, default=25)
+    p.add_argument(
+        "--srm-q", type=int, default=100,
+        help="SRM granularity for Mixed and SRM segmentation; default 100",
+    )
     p.add_argument("--invert", action="store_true", help="use when fibers are darker than background")
     p.add_argument("--skip-diameterj", action="store_true", help="create masks/QC only")
     p.add_argument("--fiji", type=Path, default=DEFAULT_FIJI)
@@ -121,14 +132,59 @@ def process(path: Path, args: argparse.Namespace, method: str) -> dict[str, obje
     }
 
 
+def summarize_fiji_mask(
+    source: Path, mask_path: Path, family: str, method: str, args: argparse.Namespace
+) -> dict[str, object]:
+    raw = tifffile.imread(source)
+    if raw.ndim == 3:
+        raw = raw[..., :3].mean(axis=-1)
+    image = raw[: raw.shape[0] - args.crop_bottom or None].astype(np.float32)
+    image = exposure.rescale_intensity(image, out_range=(0.0, 1.0))
+    pixels = tifffile.imread(mask_path)
+    mask = pixels == np.min(pixels)
+    px_um = args.pixel_size_um if args.pixel_size_um else args.hfw_um / raw.shape[1]
+    skeleton = morphology.skeletonize(mask)
+    distance = ndi.distance_transform_edt(mask)
+    diam_px = 2.0 * distance[skeleton]
+    diam_um = diam_px * px_um
+    stem = mask_path.stem
+    Image.fromarray(overlay(image, mask)).save(args.output / f"{stem}_overlay.png")
+    pd.DataFrame({"diameter_px": diam_px, "diameter_um": diam_um}).to_csv(
+        args.output / f"{stem}_diameters.csv", index=False
+    )
+    return {
+        "source": str(source), "method": f"{family}:{method}", "width_px": raw.shape[1],
+        "analysis_height_px": image.shape[0], "crop_bottom_px": args.crop_bottom,
+        "pixel_size_um": px_um, "threshold": np.nan,
+        "fiber_area_fraction": float(mask.mean()), "skeleton_samples": int(diam_um.size),
+        "qc_mean_diameter_um": float(np.mean(diam_um)) if diam_um.size else np.nan,
+        "qc_median_diameter_um": float(np.median(diam_um)) if diam_um.size else np.nan,
+        "qc_std_diameter_um": float(np.std(diam_um, ddof=1)) if diam_um.size > 1 else np.nan,
+        "mask_path": str(mask_path),
+    }
+
+
 def main() -> None:
     args = parse_args()
     files = input_files(args.input)
     if not files:
         raise SystemExit(f"No TIFF images found at {args.input}")
-    methods = METHODS if args.all_methods else (args.method,)
-    rows = [process(path, args, method) for path in files for method in methods]
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.segmentation == "python":
+        methods = METHODS if args.all_methods else (args.method,)
+        rows = [process(path, args, method) for path in files for method in methods]
+    else:
+        if args.all_methods:
+            raise SystemExit("--all-methods applies only to --segmentation python")
+        rows = []
+        for path in files:
+            masks = run_fiji_segmentation(
+                path, args.output, args.segmentation, args.crop_bottom, args.srm_q, args.fiji
+            )
+            rows.extend(
+                summarize_fiji_mask(path, mask_path, family, method, args)
+                for mask_path, family, method in masks
+            )
     with (args.output / "python_qc_summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()

@@ -71,6 +71,73 @@ docker run --rm \
   --all-methods
 ```
 
+### DiameterJ Traditional segmentation
+
+Generate and analyze the eight original Traditional masks: Huang, Percentile,
+MinError(I), Triangle, Li, Otsu, MaxEntropy, and RenyiEntropy.
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --segmentation traditional
+```
+
+### DiameterJ Mixed segmentation
+
+Generate and analyze four masks by applying SRM with `q=100`, followed by
+Huang, MinError(I), Percentile, or Triangle thresholding.
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --segmentation mixed
+```
+
+Set another SRM granularity with `--srm-q`, for example:
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --segmentation mixed \
+  --srm-q 50
+```
+
+The default `--segmentation python` preserves the Python segmentation workflow
+used by `--method` and `--all-methods`.
+
+### Statistical Region Merging segmentation
+
+Run DiameterJ's Fiji Statistical Region Merging branch. With the default
+`--srm-q 100`, it produces four threshold masks after recursive SRM levels
+`q=100,50,25,12` and four more after levels `q=50,10`. Each group uses Huang,
+MinError(I), Percentile, and Triangle thresholding. Other starting values derive
+the recursive levels as `q`, `q/2`, `q/4`, `q/8`, and `q/10`.
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --segmentation srm
+```
+
+Use `--segmentation all` to generate Traditional, Mixed, and SRM masks in one
+run.
+
 Common analysis options:
 
 - `--crop-bottom N`: remove an instrument footer of `N` pixels; default `59`.
@@ -79,6 +146,7 @@ Common analysis options:
 - `--sigma N`: Gaussian denoising sigma; default `1.0`.
 - `--min-object-px N`: minimum retained object size; default `25`.
 - `--min-hole-px N`: minimum filled hole size; default `25`.
+- `--srm-q N`: SRM granularity for Mixed and SRM modes; default `100`.
 - `--invert`: use for fibers darker than the background.
 - `--skip-diameterj`: generate segmentation and Python QC outputs only.
 

@@ -19,6 +19,7 @@ from skimage import exposure, morphology
 
 from run_diameterj_batch import DEFAULT_FIJI, VENDOR_MACRO, run_diameterj
 from run_diameterj_segmentation import (
+    AUTO_THRESHOLD_METHODS,
     create_overlay_montage,
     run_fiji_segmentation,
     workflow_candidates,
@@ -40,7 +41,17 @@ def parse_args() -> argparse.Namespace:
             "all",
         ),
         default="auto-thresholding",
-        help="Fiji segmentation workflow; each family generates all 17 thresholds",
+        help="Fiji segmentation workflow",
+    )
+    p.add_argument(
+        "--threshold-methods",
+        action="append",
+        metavar="METHOD[,METHOD...]",
+        help=(
+            "threshold method slug(s) to run; repeat the option or provide a "
+            "comma-separated Galaxy multi-select value (default: all 17). "
+            "Available: " + ", ".join(slug for _, slug in AUTO_THRESHOLD_METHODS)
+        ),
     )
     p.add_argument(
         "--crop-bottom", type=int, default=59, help="instrument footer height in pixels"
@@ -158,6 +169,7 @@ def main() -> None:
             args.crop_bottom,
             args.srm_q,
             args.fiji,
+            args.threshold_methods,
         )
         image_rows = [
             summarize_fiji_mask(path, mask_path, family, method, args)
@@ -170,7 +182,9 @@ def main() -> None:
         ]
         labels = [
             str(candidate["display"])
-            for candidate in workflow_candidates(args.segmentation, args.srm_q)
+            for candidate in workflow_candidates(
+                args.segmentation, args.srm_q, args.threshold_methods
+            )
         ]
         source_pixels = tifffile.imread(path)
         create_overlay_montage(

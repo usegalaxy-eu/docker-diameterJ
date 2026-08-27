@@ -40,8 +40,9 @@ docker run --rm \
 ```
 
 The default workflow uses Fiji Auto Thresholding to generate all 17 threshold
-candidates and then runs DiameterJ. TIFF extension matching is case-insensitive,
-but directory scanning is not recursive.
+candidates and then runs DiameterJ. Use `--threshold-methods` to process only
+the methods selected in a UI or on the command line. TIFF extension matching is
+case-insensitive, but directory scanning is not recursive.
 
 To process one image, pass its path inside the container:
 
@@ -81,6 +82,25 @@ The Fiji workflows use 17 methods: Default, Huang, Huang2, Intermodes, IsoData,
 Li, MaxEntropy, Mean, MinError(I), Minimum, Moments, Otsu, Percentile,
 RenyiEntropy, Shanbhag, Triangle, and Yen. `Try all` is an interactive command,
 not an additional threshold method.
+
+Choose one or more methods with their lowercase slugs. A comma-separated value
+is accepted so a Galaxy multi-select can be passed directly:
+
+```bash
+docker run --rm \
+  -v "$PWD/data:/app/data:ro" \
+  -v "$PWD/results:/app/results" \
+  sem_diameterj:0.1 \
+  --input /app/data \
+  --output /app/results \
+  --segmentation recursive-srm \
+  --threshold-methods default,otsu,triangle
+```
+
+The option can instead be repeated, for example
+`--threshold-methods otsu --threshold-methods yen`. If it is omitted, all 17
+methods are run. The selected methods apply to each workflow when
+`--segmentation all` is used.
 
 ```bash
 docker run --rm \

@@ -44,15 +44,49 @@ FIJI_MODES = (
 )
 
 
-def workflow_candidates(mode: str, srm_q: int) -> list[dict[str, object]]:
+def selected_threshold_methods(
+    requested: list[str] | tuple[str, ...] | None,
+) -> tuple[tuple[str, str], ...]:
+    """Validate method slugs supplied by the CLI/Galaxy multi-select."""
+    if requested is None:
+        return AUTO_THRESHOLD_METHODS
+
+    requested_slugs = [
+        slug.strip().lower()
+        for value in requested
+        for slug in value.split(",")
+        if slug.strip()
+    ]
+    if not requested_slugs:
+        raise ValueError("At least one threshold method must be selected")
+
+    by_slug = {slug: (display, slug) for display, slug in AUTO_THRESHOLD_METHODS}
+    unknown = sorted(set(requested_slugs) - set(by_slug))
+    if unknown:
+        valid = ", ".join(by_slug)
+        raise ValueError(
+            f"Unknown threshold method(s): {', '.join(unknown)}. Valid methods: {valid}"
+        )
+
+    # Preserve the canonical Fiji order and discard duplicate selections.
+    selected = set(requested_slugs)
+    return tuple(method for method in AUTO_THRESHOLD_METHODS if method[1] in selected)
+
+
+def workflow_candidates(
+    mode: str,
+    srm_q: int,
+    threshold_methods: list[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, object]]:
     """Describe every output mask in deterministic montage/export order."""
     q_half = max(1, srm_q // 2)
     q_quarter = max(1, srm_q // 4)
     q_eighth = max(1, srm_q // 8)
     candidates: list[dict[str, object]] = []
+    methods = selected_threshold_methods(threshold_methods)
 
     if mode in {"auto-thresholding", "all"}:
-        for display, slug in AUTO_THRESHOLD_METHODS:
+        for display, slug in methods:
             candidates.append(
                 {
                     "family": "auto_thresholding",
@@ -68,7 +102,7 @@ def workflow_candidates(mode: str, srm_q: int) -> list[dict[str, object]]:
         for sequence in sequences:
             levels = "_".join(str(q) for q in sequence)
             label_levels = " -> ".join(f"q={q}" for q in sequence)
-            for display, slug in AUTO_THRESHOLD_METHODS:
+            for display, slug in methods:
                 candidates.append(
                     {
                         "family": "recursive_srm",
@@ -80,7 +114,7 @@ def workflow_candidates(mode: str, srm_q: int) -> list[dict[str, object]]:
                 )
 
     if mode in {"srm-auto-thresholding", "all"}:
-        for display, slug in AUTO_THRESHOLD_METHODS:
+        for display, slug in methods:
             candidates.append(
                 {
                     "family": "srm_auto_thresholding",
@@ -284,6 +318,7 @@ def run_fiji_segmentation(
     crop_bottom: int,
     srm_q: int,
     fiji: Path = DEFAULT_FIJI,
+    threshold_methods: list[str] | tuple[str, ...] | None = None,
 ) -> list[tuple[Path, str, str]]:
     """Return generated mask path, family, and method tuples."""
     pixels = tifffile.imread(image)
@@ -300,7 +335,10 @@ def run_fiji_segmentation(
         raise SystemExit("Local Fiji executable not found")
 
     analysis_height = height - crop_bottom
-    candidates = workflow_candidates(mode, srm_q)
+    try:
+        candidates = workflow_candidates(mode, srm_q, threshold_methods)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     work_dir = Path(tempfile.mkdtemp(prefix=".diameterj_segment_", dir=output_dir))
     try:
         generated = work_dir / "generated_diameterj_segment.ijm"

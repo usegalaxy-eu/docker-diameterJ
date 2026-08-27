@@ -20,17 +20,59 @@ run_as_owner() {
     exec "$@"
 }
 
-# Galaxy supplies its generated job script as `/bin/sh tool_script.sh` while
-# bind-mounting the job working directory. Run that script as the directory's
-# owner so everything it creates remains writable by Galaxy. This also makes
-# the image work with rootless/user-mapped runtimes without chowning mounts.
+# Galaxy starts the image with its generated shell script. Match the owner of
+# the bind-mounted job directory before that script creates any files.
 case "${1:-}" in
     /bin/sh|/bin/bash)
         run_as_owner . "$@"
         ;;
 esac
 
-Xvfb "$DISPLAY" -screen 0 1280x1024x24 -nolisten tcp &
+# For direct Docker use, derive ownership from the requested output mount.
+results_dir="${ANALYSIS_RESULTS_DIR:-}"
+expect_output=0
+for argument in "$@"; do
+    if [ "$expect_output" = "1" ]; then
+        results_dir="$argument"
+        break
+    fi
+    if [ "$argument" = "--output" ]; then
+        expect_output=1
+    fi
+done
+results_dir="${results_dir:-/app/results}"
 
-results_dir="${ANALYSIS_RESULTS_DIR:-/app/results}"
-run_as_owner "$results_dir" python3 /app/src/analyze_sem.py "$@"
+if [ "$(id -u)" = "0" ] && [ -e "$results_dir" ]; then
+    run_as_owner "$results_dir" /usr/local/bin/sem-analysis "$@"
+fi
+
+display="${DISPLAY:-:99}"
+export DISPLAY="$display"
+
+Xvfb "$display" \
+    -screen 0 1280x1024x24 \
+    -nolisten tcp &
+
+xvfb_pid="$!"
+
+cleanup() {
+    kill "$xvfb_pid" 2>/dev/null || true
+    wait "$xvfb_pid" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+# Give Xvfb a moment to create its display socket.
+attempt=0
+while [ ! -S "/tmp/.X11-unix/X${display#:}" ]; do
+    attempt=$((attempt + 1))
+
+    if [ "$attempt" -ge 50 ]; then
+        echo "Xvfb did not become ready on display $display" >&2
+        exit 1
+    fi
+
+    sleep 0.1
+done
+
+python3 /app/src/analyze_sem.py "$@"

@@ -313,8 +313,21 @@ def run_fiji_segmentation(
             work_dir / f"mask_{index:02d}.tif"
             for index in range(1, len(candidates) + 1)
         ]
-        command = [str(fiji), "-macro", str(generated)]
-        process = subprocess.Popen(command)
+        # These are ImageJ1 macros. Bypassing ImageJ2's legacy compatibility
+        # layer avoids an incompatible YesNoCancelDialog bytecode patch in the
+        # pinned 2017 Fiji/ImageJ combination.
+        command = [
+            str(fiji),
+            "--ij1",
+            "--dont-patch-ij1",
+            "--default-gc",
+            "-macro",
+            str(generated),
+        ]
+        # Legacy ImageJ can emit non-fatal AWT repaint exceptions after output
+        # files are complete. Keep them out of Galaxy job logs; process status
+        # and expected-output validation below still detect real failures.
+        process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + float(
             os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "3600")
         )

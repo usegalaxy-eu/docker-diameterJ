@@ -8,11 +8,15 @@ ARG AUTO_THRESHOLD_URL=https://maven.scijava.org/content/groups/public/sc/fiji/A
 ARG AUTO_THRESHOLD_SHA256=cd13304b65d5451bf873c3263b74e71736ee0d32cfe4a848732857bd1bb5c606
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
     DIAMETERJ_EXIT_AFTER_OUTPUT=1 \
     ANALYSIS_RESULTS_DIR=/app/results \
     DISPLAY=:99
+
+# Xvfb requires this directory to exist with standard X11 permissions when the
+# container is subsequently run under Galaxy's non-root UID.
+RUN mkdir -p /tmp/.X11-unix \
+    && chown root:root /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
 
 # Fiji's May-2017 ImageJ 1.51n build bundles its required Java 8 runtime. These
 # packages provide the native GUI libraries and a virtual X server.
@@ -67,11 +71,11 @@ RUN mkdir -p /app/packages/fiji-2017 /tmp/diameterj-download \
 COPY src /app/src
 COPY entrypoint.sh /usr/local/bin/sem-analysis
 
-RUN chmod +x \
-        /usr/local/bin/sem-analysis \
-        /app/src/analyze_sem.py \
-        /app/src/run_diameterj_batch.py \
-        /app/packages/fiji-2017/Fiji.app/ImageJ-linux64
+RUN chmod 0755 \
+    /usr/local/bin/sem-analysis \
+    /app/src/analyze_sem.py \
+    /app/src/run_diameterj_batch.py \
+    /app/packages/fiji-2017/Fiji.app/ImageJ-linux64
 
 ENTRYPOINT ["/usr/local/bin/sem-analysis"]
 CMD ["--help"]

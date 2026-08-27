@@ -4,6 +4,8 @@ ARG FIJI_URL=https://downloads.imagej.net/fiji/Life-Line/fiji-linux64-20170530.z
 ARG FIJI_SHA256=c776f71da8f90afb2632094076773a150bf3af6a8aa0a1b8b2a740c0b640e801
 ARG DIAMETERJ_URL=https://imagej.net/imagej-wiki-static/images/6/65/DiameterJ_Fiji_-_1-018.zip
 ARG DIAMETERJ_SHA256=901f20f695ab1a43104b4c4a7ae2b1bfe7bb0fd2ac6c37858fe5878299fcd3d8
+ARG AUTO_THRESHOLD_URL=https://maven.scijava.org/content/groups/public/sc/fiji/Auto_Threshold/1.18.0/Auto_Threshold-1.18.0.jar
+ARG AUTO_THRESHOLD_SHA256=cd13304b65d5451bf873c3263b74e71736ee0d32cfe4a848732857bd1bb5c606
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -49,10 +51,17 @@ RUN mkdir -p /app/packages/fiji-2017 /tmp/diameterj-download \
     && echo "$DIAMETERJ_SHA256  /tmp/diameterj-download/diameterj.zip" | sha256sum --check - \
     && unzip -q /tmp/diameterj-download/diameterj.zip \
         -d /app/packages/fiji-2017/Fiji.app/plugins \
+    && curl --fail --location --retry 3 \
+        --output /tmp/diameterj-download/Auto_Threshold-1.18.0.jar "$AUTO_THRESHOLD_URL" \
+    && echo "$AUTO_THRESHOLD_SHA256  /tmp/diameterj-download/Auto_Threshold-1.18.0.jar" | sha256sum --check - \
+    && rm -f /app/packages/fiji-2017/Fiji.app/plugins/Auto_Threshold-*.jar \
+    && mv /tmp/diameterj-download/Auto_Threshold-1.18.0.jar \
+        /app/packages/fiji-2017/Fiji.app/plugins/ \
     && test -f /app/packages/fiji-2017/Fiji.app/jars/ij-1.51n.jar \
     && test -f /app/packages/fiji-2017/Fiji.app/plugins/AnalyzeSkeleton_-3.1.2.jar \
     && test -f /app/packages/fiji-2017/Fiji.app/plugins/DiameterJ/DiameterJ_1-018.ijm \
     && test -f /app/packages/fiji-2017/Fiji.app/plugins/DiameterJ/DiameterJ_Segment.ijm \
+    && test -f /app/packages/fiji-2017/Fiji.app/plugins/Auto_Threshold-1.18.0.jar \
     && rm -rf /tmp/diameterj-download
 
 COPY src /app/src

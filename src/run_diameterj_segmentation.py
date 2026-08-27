@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Run DiameterJ's original Traditional and Mixed segmentation workflows."""
+"""Run Fiji Auto Threshold workflows used by the DiameterJ container."""
 
+import math
 import os
 from pathlib import Path
 import shutil
@@ -8,161 +9,272 @@ import subprocess
 import tempfile
 import time
 
+import numpy as np
 import tifffile
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from run_diameterj_batch import DEFAULT_FIJI, ij_quote
 
 
-VENDOR_SEGMENT_MACRO = DEFAULT_FIJI.parent / "plugins/DiameterJ/DiameterJ_Segment.ijm"
-
-TRADITIONAL_METHODS = (
-    ("T1", "huang"),
-    ("T2", "percentile"),
-    ("T3", "minerror"),
-    ("T4", "triangle"),
-    ("T5", "li"),
-    ("T6", "otsu"),
-    ("T7", "maxentropy"),
-    ("T8", "renyientropy"),
-)
-THRESHOLD_METHODS = ("huang", "minerror", "percentile", "triangle")
-MIXED_SRM_METHODS = (
-    ("M1", "huang"),
-    ("M2", "minerror"),
-    ("M3", "percentile"),
-    ("M4", "triangle"),
-)
-MIXED_DIRECT_METHODS = (
-    ("M5", "huang"),
-    ("M6", "minerror"),
-    ("M7", "percentile"),
-    ("M8", "triangle"),
+AUTO_THRESHOLD_METHODS = (
+    ("Default", "default"),
+    ("Huang", "huang"),
+    ("Huang2", "huang2"),
+    ("Intermodes", "intermodes"),
+    ("IsoData", "isodata"),
+    ("Li", "li"),
+    ("MaxEntropy", "maxentropy"),
+    ("Mean", "mean"),
+    ("MinError(I)", "minerror"),
+    ("Minimum", "minimum"),
+    ("Moments", "moments"),
+    ("Otsu", "otsu"),
+    ("Percentile", "percentile"),
+    ("RenyiEntropy", "renyientropy"),
+    ("Shanbhag", "shanbhag"),
+    ("Triangle", "triangle"),
+    ("Yen", "yen"),
 )
 
+FIJI_MODES = (
+    "auto-thresholding",
+    "recursive-srm",
+    "srm-auto-thresholding",
+    "all",
+)
 
-def build_segmentation_macro(
-    source: str,
-    input_dir: Path,
-    width: int,
-    height: int,
-    crop_bottom: int,
-    traditional: bool,
-    mixed: bool,
-    srm: bool,
-    srm_q: int,
-) -> str:
-    marker = 'if(Batch_analysis == "Yes") {'
-    marker_at = source.find(marker)
-    if marker_at < 0:
-        raise RuntimeError(
-            "Unsupported DiameterJ segmentation macro: batch marker not found"
-        )
 
-    analysis_height = height - crop_bottom
+def workflow_candidates(mode: str, srm_q: int) -> list[dict[str, object]]:
+    """Describe every output mask in deterministic montage/export order."""
     q_half = max(1, srm_q // 2)
     q_quarter = max(1, srm_q // 4)
     q_eighth = max(1, srm_q // 8)
-    q_tenth = max(1, srm_q // 10)
-    prefix = f"""// Generated non-interactive segmentation options.
-crop_outcome = "Yes";
-iw = {width};
-ih = {height};
-crop_tlx = 0;
-crop_tly = 0;
-crop_brx = {width};
-crop_bry = {analysis_height};
-TLCB_None = 0;
-TRCB_Trad = {1 if traditional else 0};
-BLCB_SRM = {1 if srm else 0};
-BRCB_Mix = {1 if mixed else 0};
-Batch_analysis = "Yes";
-IJorFIJI = getVersion();
-thresh_dots = "Auto Threshold";
-srm_q = {srm_q};
-srm_q_half = {q_half};
-srm_q_quarter = {q_quarter};
-srm_q_eighth = {q_eighth};
-srm_q_tenth = {q_tenth};
+    candidates: list[dict[str, object]] = []
 
-"""
-    generated = prefix + source[marker_at:]
-    prompt = 'dir1 = getDirectory("Choose Source Directory ");'
-    directory = input_dir.resolve().as_posix().rstrip("/") + "/"
-    if prompt not in generated:
-        raise RuntimeError(
-            "Unsupported DiameterJ segmentation macro: directory prompt not found"
+    if mode in {"auto-thresholding", "all"}:
+        for display, slug in AUTO_THRESHOLD_METHODS:
+            candidates.append(
+                {
+                    "family": "auto_thresholding",
+                    "method": slug,
+                    "display": f"Auto Thresholding: {display}",
+                    "srm": (),
+                    "fiji_method": display,
+                }
+            )
+
+    if mode in {"recursive-srm", "all"}:
+        sequences = ((srm_q, q_half, q_quarter, q_eighth),)
+        for sequence in sequences:
+            levels = "_".join(str(q) for q in sequence)
+            label_levels = " -> ".join(f"q={q}" for q in sequence)
+            for display, slug in AUTO_THRESHOLD_METHODS:
+                candidates.append(
+                    {
+                        "family": "recursive_srm",
+                        "method": f"q{levels}_{slug}",
+                        "display": f"Recursive SRM {label_levels}: {display}",
+                        "srm": sequence,
+                        "fiji_method": display,
+                    }
+                )
+
+    if mode in {"srm-auto-thresholding", "all"}:
+        for display, slug in AUTO_THRESHOLD_METHODS:
+            candidates.append(
+                {
+                    "family": "srm_auto_thresholding",
+                    "method": f"q{srm_q}_{slug}",
+                    "display": f"SRM q={srm_q} + Auto Thresholding: {display}",
+                    "srm": (srm_q,),
+                    "fiji_method": display,
+                }
+            )
+
+    return candidates
+
+
+def build_segmentation_macro(
+    image: Path,
+    output_dir: Path,
+    width: int,
+    analysis_height: int,
+    candidates: list[dict[str, object]],
+) -> str:
+    """Build a non-interactive Fiji macro for the selected workflows."""
+    lines = [
+        "setBatchMode(true);",
+        f'input_path = "{ij_quote(image.resolve().as_posix())}";',
+        "output_dir = \""
+        + ij_quote(output_dir.resolve().as_posix().rstrip("/") + "/")
+        + "\";",
+        "File.makeDirectory(output_dir);",
+    ]
+    sequences = list(
+        dict.fromkeys(
+            tuple(candidate["srm"]) for candidate in candidates if candidate["srm"]
         )
-    generated = generated.replace(prompt, f'dir1 = "{ij_quote(directory)}";', 1)
-    generated = generated.replace("open(name0);", "open(dir1+name0);")
-    # Mixed uses one SRM pass at the requested q. Restrict this replacement to
-    # Mixed blocks before replacing the fixed values in the SRM branch.
-    parts = generated.split("// Runs Mixed Segmentation Algorithms")
-    for index in range(1, len(parts)):
-        mixed_part, separator, remainder = parts[index].partition(
-            "// Runs Statistical Region Merging Segmentation Techniques"
+    )
+    sequence_paths: dict[tuple[object, ...], str] = {}
+    for index, sequence in enumerate(sequences, start=1):
+        path = f"srm_source_{index:02d}.tif"
+        sequence_paths[sequence] = path
+        lines.extend(
+            [
+                "open(input_path);",
+                'run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixels");',
+                f"makeRectangle(0, 0, {width}, {analysis_height});",
+                'run("Crop");',
+            ]
         )
-        mixed_part = mixed_part.replace("q=25 showaverages", 'q="+srm_q+" showaverages')
-        parts[index] = mixed_part + separator + remainder
-    generated = "// Runs Mixed Segmentation Algorithms".join(parts)
-    generated = generated.replace("q=100 showaverages", 'q="+srm_q+" showaverages')
-    generated = generated.replace("q=50 showaverages", 'q="+srm_q_half+" showaverages')
-    generated = generated.replace(
-        "q=25 showaverages", 'q="+srm_q_quarter+" showaverages'
-    )
-    generated = generated.replace(
-        "q=12 showaverages", 'q="+srm_q_eighth+" showaverages'
-    )
-    generated = generated.replace("q=10 showaverages", 'q="+srm_q_tenth+" showaverages')
-    # Fiji uses the opened filename as each montage label. Replace DiameterJ's
-    # opaque T/M/S codes with the actual segmentation method names.
-    generated = generated.replace(
-        'open(dir1+name0);\n\t\t\trun("Invert");',
-        'open(dir1+name0);\n\t\t\trename("Original");\n\t\t\trun("Invert");',
-    )
-    montage_labels = {
-        1: 'Mixed SRM q="+srm_q+" Huang',
-        3: 'Mixed SRM q="+srm_q+" MinError',
-        4: 'Mixed SRM q="+srm_q+" Percentile',
-        5: 'Mixed SRM q="+srm_q+" Triangle',
-        6: "Mixed Direct Huang",
-        7: "Mixed Direct MinError",
-        8: "Mixed Direct Percentile",
-        9: "Mixed Direct Triangle",
-        13: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Huang',
-        14: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" MinError',
-        15: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Percentile',
-        16: 'SRM q="+srm_q+"-"+srm_q_half+"-"+srm_q_quarter+"-"+srm_q_eighth+" Triangle',
-        17: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Huang',
-        18: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" MinError',
-        19: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Percentile',
-        20: 'SRM q="+srm_q_half+"-"+srm_q_tenth+" Triangle',
-        23: "Traditional Huang",
-        24: "Traditional Percentile",
-        25: "Traditional MinError",
-        26: "Traditional Triangle",
-        27: "Traditional Li",
-        28: "Traditional Otsu",
-        29: "Traditional MaxEntropy",
-        30: "Traditional RenyiEntropy",
-    }
-    for path_number, label in montage_labels.items():
-        generated = generated.replace(
-            f'open(path{path_number}+".tif");',
-            f'open(path{path_number}+".tif"); rename("{label}");',
+        for q_index, q in enumerate(sequence):
+            lines.extend(
+                [
+                    f'run("Statistical Region Merging", "q={q} showaverages");',
+                    'run("8-bit");',
+                    f'File.delete(output_dir + "{path}");',
+                    f'saveAs("Tiff", output_dir + "{path}");',
+                    'run("Close All");',
+                ]
+            )
+            if q_index < len(sequence) - 1:
+                lines.append(f'open(output_dir + "{path}");')
+    cleanup = [
+        "getHistogram(values, counts, 256);",
+        "previous = counts[255];",
+        "do {",
+        "    current = previous;",
+        '    run("Despeckle");',
+        "    getHistogram(values, counts, 256);",
+        "    previous = counts[255];",
+        "} while (previous != current);",
+        'run("Remove Outliers...", "radius=3 threshold=50 which=Dark");',
+        'run("Remove Outliers...", "radius=3 threshold=50 which=Bright");',
+        'run("Remove Outliers...", "radius=3 threshold=50 which=Dark");',
+        'run("Remove Outliers...", "radius=3 threshold=50 which=Bright");',
+        'run("Erode");',
+        'run("Dilate");',
+        'run("Fill Holes");',
+        "getHistogram(values, counts, 256);",
+        "white_before = counts[255];",
+        'run("Make Binary");',
+        "getHistogram(values, counts, 256);",
+        "white_after = counts[255];",
+        'if (white_before == white_after) run("Invert");',
+    ]
+
+    for index, candidate in enumerate(candidates, start=1):
+        sequence = tuple(candidate["srm"])
+        source = (
+            f'output_dir + "{sequence_paths[sequence]}"' if sequence else "input_path"
         )
-    # The SRM branch repeatedly saves intermediate images to the same path.
-    # ImageJ's unattended save does not reliably overwrite, so delete the old
-    # intermediate before each save.
-    generated = generated.replace(
-        'saveAs("Tiff", path11);',
-        'File.delete(path11+".tif");\n\t\t\t\t\t\tsaveAs("Tiff", path11);',
+        lines.extend(
+            [
+                f"open({source});",
+                'run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixels");',
+            ]
+        )
+        if not sequence:
+            lines.extend(
+                [
+                    f"makeRectangle(0, 0, {width}, {analysis_height});",
+                    'run("Crop");',
+                ]
+            )
+        method = candidate["fiji_method"]
+        lines.append(
+            f'run("Auto Threshold", "method={method} ignore_white white");'
+        )
+        lines.extend(cleanup)
+        lines.extend(
+            [
+                f'saveAs("Tiff", output_dir + "mask_{index:02d}.tif");',
+                'run("Close All");',
+            ]
+        )
+    lines.extend(["setBatchMode(false);", 'eval("script", "System.exit(0);");'])
+    return "\n".join(lines) + "\n"
+
+
+def _original_panel(image: Path, analysis_height: int) -> Image.Image:
+    pixels = tifffile.imread(image)[:analysis_height]
+    if pixels.ndim == 3:
+        pixels = pixels[..., :3].mean(axis=-1)
+    pixels = pixels.astype(np.float32)
+    low, high = float(np.min(pixels)), float(np.max(pixels))
+    if high > low:
+        pixels = (pixels - low) * (255.0 / (high - low))
+    else:
+        pixels = np.zeros_like(pixels)
+    return Image.fromarray(np.round(pixels).astype(np.uint8))
+
+
+def create_montage(
+    original: Path,
+    masks: list[Path],
+    labels: list[str],
+    destination: Path,
+    analysis_height: int,
+) -> None:
+    """Write a labelled PNG review sheet containing the original and masks."""
+    panels = [_original_panel(original, analysis_height)] + [
+        Image.open(mask).convert("L") for mask in masks
+    ]
+    panels = [ImageOps.colorize(panel, "black", "white") for panel in panels]
+    _write_montage(panels, ["Original"] + labels, destination)
+
+
+def create_overlay_montage(
+    original: Path,
+    overlays: list[Path],
+    labels: list[str],
+    destination: Path,
+    analysis_height: int,
+) -> None:
+    """Write a labelled PNG review sheet containing every boundary overlay."""
+    original_panel = ImageOps.colorize(
+        _original_panel(original, analysis_height), "black", "white"
     )
-    generated = generated.replace(
-        'saveAs("Tiff", path12);',
-        'File.delete(path12+".tif");\n\t\t\t\t\t\tsaveAs("Tiff", path12);',
-    )
-    return generated
+    panels = [original_panel] + [Image.open(path).convert("RGB") for path in overlays]
+    _write_montage(panels, ["Original"] + labels, destination)
+
+
+def _write_montage(
+    panels: list[Image.Image], panel_labels: list[str], destination: Path
+) -> None:
+    """Lay out equally sized RGB panels with readable labels."""
+    width, height = panels[0].size
+    font_size = max(24, min(40, height // 20))
+    font = ImageFont.load_default(size=font_size)
+    label_height = font_size + 16
+    columns = math.ceil(math.sqrt(len(panels)))
+    rows = math.ceil(len(panels) / columns)
+    montage_size = (columns * width, rows * (height + label_height))
+    montage = Image.new("RGB", montage_size, "black")
+    draw = ImageDraw.Draw(montage)
+    for index, (panel, label) in enumerate(zip(panels, panel_labels)):
+        x = (index % columns) * width
+        y = (index // columns) * (height + label_height)
+        montage.paste(panel, (x, y))
+        label_box = (x, y + height, x + width, y + height + label_height)
+        draw.rectangle(label_box, fill="black")
+        label_font = font
+        label_font_size = font_size
+        while (
+            draw.textbbox((0, 0), label, font=label_font)[2] > width - 16
+            and label_font_size > 20
+        ):
+            label_font_size -= 2
+            label_font = ImageFont.load_default(size=label_font_size)
+        draw.text(
+            (x + 8, y + height + 6),
+            label,
+            fill=(255, 64, 64),
+            font=label_font,
+            stroke_width=1,
+            stroke_fill="black",
+        )
+    montage.save(destination)
 
 
 def run_fiji_segmentation(
@@ -172,7 +284,6 @@ def run_fiji_segmentation(
     crop_bottom: int,
     srm_q: int,
     fiji: Path = DEFAULT_FIJI,
-    macro: Path = VENDOR_SEGMENT_MACRO,
 ) -> list[tuple[Path, str, str]]:
     """Return generated mask path, family, and method tuples."""
     pixels = tifffile.imread(image)
@@ -183,66 +294,25 @@ def run_fiji_segmentation(
         )
     if srm_q <= 0:
         raise SystemExit("--srm-q must be positive")
-    if not fiji.is_file() or not macro.is_file():
-        raise SystemExit("Local Fiji or DiameterJ segmentation macro not found")
+    if mode not in FIJI_MODES:
+        raise SystemExit(f"Unsupported Fiji segmentation mode: {mode}")
+    if not fiji.is_file():
+        raise SystemExit("Local Fiji executable not found")
 
-    traditional = mode in {"traditional", "all"}
-    mixed = mode in {"mixed", "all"}
-    srm = mode in {"srm", "all"}
-    methods = []
-    if traditional:
-        methods.extend(
-            (code, "traditional", name) for code, name in TRADITIONAL_METHODS
-        )
-    if mixed:
-        methods.extend(
-            (code, "mixed", f"srm_q{srm_q}_{name}")
-            for code, name in MIXED_SRM_METHODS
-        )
-        methods.extend(
-            (code, "mixed", f"direct_{name}")
-            for code, name in MIXED_DIRECT_METHODS
-        )
-    if srm:
-        q_half = max(1, srm_q // 2)
-        q_quarter = max(1, srm_q // 4)
-        q_eighth = max(1, srm_q // 8)
-        q_tenth = max(1, srm_q // 10)
-        first = f"q{srm_q}_{q_half}_{q_quarter}_{q_eighth}"
-        second = f"q{q_half}_{q_tenth}"
-        for index, name in enumerate(THRESHOLD_METHODS, start=1):
-            methods.append((f"S{index}", "srm", f"{first}_{name}"))
-            methods.append((f"S{index + 4}", "srm", f"{second}_{name}"))
-        methods.sort(key=lambda item: (item[1], item[0]))
-
+    analysis_height = height - crop_bottom
+    candidates = workflow_candidates(mode, srm_q)
     work_dir = Path(tempfile.mkdtemp(prefix=".diameterj_segment_", dir=output_dir))
     try:
-        staged = work_dir / image.name
-        shutil.copy2(image, staged)
         generated = work_dir / "generated_diameterj_segment.ijm"
         generated.write_text(
             build_segmentation_macro(
-                macro.read_text(),
-                work_dir,
-                width,
-                height,
-                crop_bottom,
-                traditional,
-                mixed,
-                srm,
-                srm_q,
+                image, work_dir, width, analysis_height, candidates
             )
         )
-        segmented = work_dir / "Segmented Images"
-        expected = [segmented / f"{image.stem}_{code}.tif" for code, _, _ in methods]
-        montage_names = {
-            "traditional": "Trad Montage",
-            "mixed": "Mix Montage",
-            "srm": "SRM Montage",
-            "all": "Trad&Mix&SRM Montage",
-        }
-        montage = work_dir / "Montage Images" / f"{image.stem}_{montage_names[mode]}.png"
-        expected.append(montage)
+        expected = [
+            work_dir / f"mask_{index:02d}.tif"
+            for index in range(1, len(candidates) + 1)
+        ]
         command = [str(fiji), "-macro", str(generated)]
         process = subprocess.Popen(command)
         deadline = time.monotonic() + float(
@@ -256,7 +326,7 @@ def run_fiji_segmentation(
                 if returncode is not None:
                     raise subprocess.CalledProcessError(returncode, command)
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("DiameterJ segmentation timed out")
+                    raise TimeoutError("Fiji segmentation timed out")
                 time.sleep(0.5)
             time.sleep(1.0)
         finally:
@@ -269,13 +339,27 @@ def run_fiji_segmentation(
                     process.wait()
 
         results = []
-        for source_mask, (_, family, method) in zip(expected[:-1], methods):
+        png_masks = []
+        labels = []
+        for source_mask, candidate in zip(expected, candidates):
+            family = str(candidate["family"])
+            method = str(candidate["method"])
             destination = output_dir / f"{image.stem}__{family}_{method}.tif"
             shutil.copy2(source_mask, destination)
             mask_pixels = tifffile.imread(source_mask)
-            Image.fromarray(255 - mask_pixels).save(destination.with_suffix(".png"))
+            png = destination.with_suffix(".png")
+            Image.fromarray(255 - mask_pixels).save(png)
             results.append((destination, family, method))
-        shutil.copy2(montage, output_dir / f"{image.stem}__{mode}_montage.png")
+            png_masks.append(png)
+            labels.append(str(candidate["display"]))
+
+        create_montage(
+            image,
+            png_masks,
+            labels,
+            output_dir / f"{image.stem}__{mode}_segmentation_montage.png",
+            analysis_height,
+        )
         return results
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

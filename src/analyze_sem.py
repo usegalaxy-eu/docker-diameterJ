@@ -18,7 +18,11 @@ from scipy import ndimage as ndi
 from skimage import exposure, filters, morphology
 
 from run_diameterj_batch import DEFAULT_FIJI, VENDOR_MACRO, run_diameterj
-from run_diameterj_segmentation import run_fiji_segmentation
+from run_diameterj_segmentation import (
+    create_overlay_montage,
+    run_fiji_segmentation,
+    workflow_candidates,
+)
 
 
 METHODS = ("otsu", "li", "yen", "triangle")
@@ -38,7 +42,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--segmentation",
-        choices=("python", "traditional", "mixed", "srm", "all"),
+        choices=(
+            "python",
+            "auto-thresholding",
+            "recursive-srm",
+            "srm-auto-thresholding",
+            "all",
+        ),
         default="python",
         help="segmentation workflow; Fiji modes generate all methods in that family",
     )
@@ -61,7 +71,10 @@ def parse_args() -> argparse.Namespace:
         "--srm-q",
         type=int,
         default=100,
-        help="SRM granularity for Mixed and SRM segmentation; default 100",
+        help=(
+            "SRM granularity for Recursive SRM and SRM with Auto Thresholding; "
+            "default 100"
+        ),
     )
     p.add_argument(
         "--invert",
@@ -241,9 +254,27 @@ def main() -> None:
                 args.srm_q,
                 args.fiji,
             )
-            rows.extend(
+            image_rows = [
                 summarize_fiji_mask(path, mask_path, family, method, args)
                 for mask_path, family, method in masks
+            ]
+            rows.extend(image_rows)
+            overlays = [
+                args.output / f"{mask_path.stem}_overlay.png"
+                for mask_path, _, _ in masks
+            ]
+            labels = [
+                str(candidate["display"])
+                for candidate in workflow_candidates(args.segmentation, args.srm_q)
+            ]
+            source_pixels = tifffile.imread(path)
+            create_overlay_montage(
+                path,
+                overlays,
+                labels,
+                args.output
+                / f"{path.stem}__{args.segmentation}_overlay_montage.png",
+                source_pixels.shape[0] - args.crop_bottom,
             )
     with (args.output / "python_qc_summary.csv").open(
         "w", newline="", encoding="utf-8"

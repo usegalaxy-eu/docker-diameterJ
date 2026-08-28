@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import time
 
 import numpy as np
 import tifffile
@@ -159,6 +158,10 @@ def build_segmentation_macro(
                 'run("Set Scale...", "distance=0 known=0 pixel=1 unit=pixels");',
                 f"makeRectangle(0, 0, {width}, {analysis_height});",
                 'run("Crop");',
+                # The legacy SRM plugin can stall on 16-bit SEM inputs. SRM is
+                # defined here on the display-range-normalized 8-bit image for
+                # both one-pass and recursive workflows.
+                'run("8-bit");',
             ]
         )
         for q_index, q in enumerate(sequence):
@@ -365,29 +368,26 @@ def run_fiji_segmentation(
         # Legacy ImageJ can emit non-fatal AWT repaint exceptions after output
         # files are complete. Keep them out of Galaxy job logs; process status
         # and expected-output validation below still detect real failures.
-        process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + float(
-            os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "3600")
-        )
         try:
-            while not all(
-                path.is_file() and path.stat().st_size > 0 for path in expected
-            ):
-                returncode = process.poll()
-                if returncode is not None:
-                    raise subprocess.CalledProcessError(returncode, command)
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Fiji segmentation timed out")
-                time.sleep(0.5)
-            time.sleep(1.0)
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            subprocess.run(
+                command,
+                check=True,
+                stderr=subprocess.DEVNULL,
+                timeout=float(os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "600")),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise TimeoutError("Fiji segmentation timed out") from error
+
+        missing = [
+            path.name
+            for path in expected
+            if not path.is_file() or path.stat().st_size == 0
+        ]
+        if missing:
+            raise RuntimeError(
+                "Fiji segmentation finished without producing: "
+                + ", ".join(missing)
+            )
 
         results = []
         png_masks = []

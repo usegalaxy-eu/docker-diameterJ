@@ -8,8 +8,8 @@ ARG AUTO_THRESHOLD_URL=https://maven.scijava.org/content/groups/public/sc/fiji/A
 ARG AUTO_THRESHOLD_SHA256=cd13304b65d5451bf873c3263b74e71736ee0d32cfe4a848732857bd1bb5c606
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    DIAMETERJ_EXIT_AFTER_OUTPUT=1 \
     ANALYSIS_RESULTS_DIR=/app/results \
+    DIAMETERJ_TIMEOUT_SECONDS=600 \
     DISPLAY=:99
 
 # Xvfb requires this directory to exist with standard X11 permissions when the

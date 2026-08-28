@@ -2,7 +2,7 @@
 
 This container prepares scanning electron microscopy (SEM) TIFF images,
 creates binary fibre masks, runs DiameterJ v1.018, and writes DiameterJ
-measurements together with independent Python quality-control (QC) results.
+measurements together with independent quality-control (QC) results.
 It runs the legacy Fiji GUI workflow on a virtual X server, so no display is
 required on the host.
 
@@ -145,12 +145,18 @@ one-pass SRM Auto Thresholding together.
 - `--hfw-um N` sets the horizontal field width; default: `27.04` micrometres.
 - `--pixel-size-um N` supplies micrometres per pixel instead of deriving it
   from the field width and original image width.
-- `--skip-diameterj` creates masks and Python QC outputs without DiameterJ.
+- `--skip-diameterj` creates masks and QC outputs without DiameterJ.
 - `--headless` uses Fiji's experimental native headless mode. Normally the
   virtual display should be used because legacy AnalyzeSkeleton may fail
   without a GUI.
 
-Calibration is recorded in `python_qc_summary.csv` and used for Python QC
+The Fiji/DiameterJ safety timeout defaults to 600 seconds (10 minutes) per
+segmentation image. The total batch budget scales with the number of selected
+threshold methods, and completed jobs return immediately. Override the
+per-image budget with the `DIAMETERJ_TIMEOUT_SECONDS` container environment
+variable when unusually large images require more time.
+
+Calibration is recorded in `qc_summary.csv` and used for QC
 diameters. DiameterJ v1.018 runs in its validated native-pixel mode; use the
 recorded calibration to convert its results.
 
@@ -175,10 +181,10 @@ the workflow and DiameterJ result type, filenames include:
 - `<source>__srm_auto_thresholding_q<q>_<method>.png` and `.tif`: one-pass SRM masks
 - `<source>__recursive_srm_q<levels>_<method>.png` and `.tif`: recursive SRM masks
 - `<mask>_overlay.png`: red segmentation-boundary overlay
-- `<mask>_diameters.csv`: independent Python QC diameter samples
+- `<mask>_diameters.csv`: independent QC diameter samples
 - `<source>__<workflow>_segmentation_montage.png`: source and mask review sheet
 - `<source>__<workflow>_overlay_montage.png`: source and overlay review sheet
-- `python_qc_summary.csv`: calibration, area fraction, and QC summary values
+- `qc_summary.csv`: calibration, area fraction, and QC summary values
 - `<mask>_Compare.png`: DiameterJ comparison panel
 - `<mask>_Total Summary.csv`: DiameterJ summary measurements
 - `<mask>_Pore Data.csv`: DiameterJ pore measurements

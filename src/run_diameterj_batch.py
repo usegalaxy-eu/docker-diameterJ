@@ -96,7 +96,10 @@ batch_combo = "No";
         "\t\t\t\t\tFile.delete(path9);\n" + fallback_save,
         1,
     )
-    return generated
+    # The GUI application otherwise remains alive after the macro completes.
+    # Exit from inside Fiji only after the vendor macro has returned, making
+    # process completion a reliable signal that every image was processed.
+    return generated + '\nsetBatchMode(false);\neval("script", "System.exit(0);");\n'
 
 
 def run_diameterj(
@@ -150,56 +153,73 @@ def run_diameterj(
     command += ["-macro", str(generated)]
     print(f"Running DiameterJ on {len(images)} image(s) in {input_dir.resolve()}")
     output_dir = work_dir / "Diameter Analysis Images"
+    expected = []
+    for image in work_images:
+        expected.extend(
+            [
+                output_dir / f"{image.stem}_Compare.png",
+                work_dir / "Summaries" / f"{image.stem}_Total Summary.csv",
+                work_dir / "Histograms" / f"{image.stem}_Char Lengths.csv",
+                work_dir / "Histograms" / f"{image.stem}_Pore Data.csv",
+                work_dir / "Histograms" / f"{image.stem}_Radius Histo.csv",
+                work_dir / "Histograms" / f"{image.stem}_Radius Plot.tif",
+            ]
+        )
     try:
-        if os.environ.get("DIAMETERJ_EXIT_AFTER_OUTPUT") == "1":
-            expected = []
-            for image in work_images:
-                expected.extend(
-                    [
-                        output_dir / f"{image.stem}_Compare.png",
-                        work_dir / "Summaries" / f"{image.stem}_Total Summary.csv",
-                        work_dir / "Histograms" / f"{image.stem}_Pore Data.csv",
-                    ]
-                )
-            # DiameterJ's legacy GUI can emit non-fatal AWT TextCanvas repaint
-            # exceptions. Suppress its stderr while retaining exit-code,
-            # timeout, and expected-output validation.
-            process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
-            deadline = time.monotonic() + float(
-                os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "3600")
-            )
-            stall_seconds = float(os.environ.get("DIAMETERJ_STALL_SECONDS", "15"))
-            completed_count = 0
-            last_progress = time.monotonic()
-            try:
-                while True:
-                    current_count = sum(
+        # DiameterJ's legacy GUI JVM remains open after the macro becomes idle.
+        # Wait for the complete result set from every requested image before
+        # closing it. In particular, do not infer completion from a quiet period:
+        # individual AnalyzeSkeleton runs can legitimately take much longer.
+        timeout_per_image = float(
+            os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "600")
+        )
+        if timeout_per_image <= 0:
+            raise ValueError("DIAMETERJ_TIMEOUT_SECONDS must be positive")
+        # Treat the configured timeout as a per-image budget. A single fixed
+        # deadline penalizes valid multi-mask runs even when DiameterJ is still
+        # making progress through the batch.
+        deadline = time.monotonic() + timeout_per_image * len(images)
+        process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
+        try:
+            while not all(
+                path.is_file() and path.stat().st_size > 0 for path in expected
+            ):
+                returncode = process.poll()
+                if returncode is not None:
+                    if returncode:
+                        raise subprocess.CalledProcessError(returncode, command)
+                    break
+                if time.monotonic() >= deadline:
+                    completed = sum(
                         path.is_file() and path.stat().st_size > 0
                         for path in expected
                     )
-                    if current_count == len(expected):
-                        time.sleep(2.0)
-                        break
-                    if current_count > completed_count:
-                        completed_count = current_count
-                        last_progress = time.monotonic()
-                    returncode = process.poll()
-                    if returncode is not None:
-                        break
-                    now = time.monotonic()
-                    if now >= deadline or now - last_progress >= stall_seconds:
-                        break
-                    time.sleep(0.5)
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-        else:
-            subprocess.run(command, check=True, stderr=subprocess.DEVNULL)
+                    raise TimeoutError(
+                        "DiameterJ analysis timed out after "
+                        f"{timeout_per_image:g} seconds per image "
+                        f"({completed}/{len(expected)} expected result files completed)"
+                    )
+                time.sleep(0.5)
+            # Allow the final save operation to flush before stopping the idle GUI.
+            time.sleep(2.0)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+        missing = [
+            path.relative_to(work_dir).as_posix()
+            for path in expected
+            if not path.is_file() or path.stat().st_size == 0
+        ]
+        if missing:
+            raise RuntimeError(
+                "DiameterJ finished without producing: " + ", ".join(missing)
+            )
         for category in ("Diameter Analysis Images", "Histograms", "Summaries"):
             category_dir = work_dir / category
             if category_dir.is_dir():

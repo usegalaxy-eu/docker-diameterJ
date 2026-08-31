@@ -2,8 +2,7 @@
 """Segment SEM micrographs with Fiji and run DiameterJ with independent QC.
 
 Fiji generates binary TIFF candidates using the selected segmentation family.
-Python calculates an independent diameter QC for those masks; DiameterJ remains
-the primary measurement workflow.
+DiameterJ remains the primary measurement workflow.
 """
 
 import argparse
@@ -194,7 +193,7 @@ def main() -> None:
             args.output / f"{path.stem}__{args.segmentation}_overlay_montage.png",
             source_pixels.shape[0] - args.crop_bottom,
         )
-    with (args.output / "python_qc_summary.csv").open(
+    with (args.output / "qc_summary.csv").open(
         "w", newline="", encoding="utf-8"
     ) as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -207,7 +206,7 @@ def main() -> None:
             # DiameterJ v1.018 is validated in native pixel mode. Applying a
             # physical scale before its particle analysis changes legacy size
             # filtering and can collapse the pore result. Calibration remains
-            # recorded in python_qc_summary.csv for post-analysis conversion.
+            # recorded in qc_summary.csv for post-analysis conversion.
             pixel_size_um=None,
             fiji=args.fiji,
             macro=args.diameterj_macro,

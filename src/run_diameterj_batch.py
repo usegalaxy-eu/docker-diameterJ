@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Sequence
@@ -131,101 +132,111 @@ def run_diameterj(
         if pixels.ndim != 2 or not set(values.tolist()).issubset({0, 1, 254, 255}):
             raise SystemExit(f"{image}: DiameterJ input must be a 2-D binary TIFF")
 
-    # DiameterJ scans every TIFF in its source directory and always creates
-    # category subdirectories. Isolate only the requested masks in a temporary
-    # work directory, then flatten its result files into input_dir.
+    # DiameterJ scans every TIFF in its source directory and retains substantial
+    # ImageJ state between images. Run each mask in a separate directory and JVM
+    # so a problematic threshold candidate cannot stall the rest of the batch.
     work_dir = Path(tempfile.mkdtemp(prefix=".diameterj_work_", dir=input_dir))
-    work_images = []
-    for image in images:
-        staged = work_dir / image.name
-        shutil.copy2(image, staged)
-        work_images.append(staged)
-
-    generated = work_dir / "generated_diameterj_batch.ijm"
-    generated.write_text(build_macro(macro.read_text(), work_dir, pixel_size_um))
-
-    # DiameterJ is an ImageJ1 macro. Do not initialize ImageJ2's legacy layer:
-    # its patcher is incompatible with this pinned ImageJ 1.51n build and emits
-    # a harmless but alarming YesNoCancelDialog stack trace on every launch.
-    command = [str(fiji), "--ij1", "--dont-patch-ij1", "--default-gc"]
-    if headless:
-        command += ["--headless", "--console"]
-    command += ["-macro", str(generated)]
     print(f"Running DiameterJ on {len(images)} image(s) in {input_dir.resolve()}")
-    output_dir = work_dir / "Diameter Analysis Images"
-    expected = []
-    for image in work_images:
-        expected.extend(
-            [
-                output_dir / f"{image.stem}_Compare.png",
-                work_dir / "Summaries" / f"{image.stem}_Total Summary.csv",
-                work_dir / "Histograms" / f"{image.stem}_Char Lengths.csv",
-                work_dir / "Histograms" / f"{image.stem}_Pore Data.csv",
-                work_dir / "Histograms" / f"{image.stem}_Radius Histo.csv",
-                work_dir / "Histograms" / f"{image.stem}_Radius Plot.tif",
-            ]
-        )
     try:
-        # DiameterJ's legacy GUI JVM remains open after the macro becomes idle.
-        # Wait for the complete result set from every requested image before
-        # closing it. In particular, do not infer completion from a quiet period:
-        # individual AnalyzeSkeleton runs can legitimately take much longer.
         timeout_per_image = float(
-            os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "600")
+            os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "1200")
         )
         if timeout_per_image <= 0:
             raise ValueError("DIAMETERJ_TIMEOUT_SECONDS must be positive")
-        # Treat the configured timeout as a per-image budget. A single fixed
-        # deadline penalizes valid multi-mask runs even when DiameterJ is still
-        # making progress through the batch.
-        deadline = time.monotonic() + timeout_per_image * len(images)
-        process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
-        try:
-            while not all(
-                path.is_file() and path.stat().st_size > 0 for path in expected
-            ):
-                returncode = process.poll()
-                if returncode is not None:
-                    if returncode:
-                        raise subprocess.CalledProcessError(returncode, command)
-                    break
-                if time.monotonic() >= deadline:
-                    completed = sum(
+
+        macro_source = macro.read_text()
+        completed_images = 0
+        failed_images: list[str] = []
+        for index, image in enumerate(images, start=1):
+            image_work_dir = work_dir / f"image_{index:03d}"
+            image_work_dir.mkdir()
+            staged = image_work_dir / image.name
+            shutil.copy2(image, staged)
+            generated = image_work_dir / "generated_diameterj_batch.ijm"
+            generated.write_text(
+                build_macro(macro_source, image_work_dir, pixel_size_um)
+            )
+
+            # DiameterJ is an ImageJ1 macro. Do not initialize ImageJ2's legacy
+            # layer, which is incompatible with this pinned ImageJ 1.51n build.
+            command = [str(fiji), "--ij1", "--dont-patch-ij1", "--default-gc"]
+            if headless:
+                command += ["--headless", "--console"]
+            command += ["-macro", str(generated)]
+            expected = [
+                image_work_dir
+                / "Diameter Analysis Images"
+                / f"{image.stem}_Compare.png",
+                image_work_dir / "Summaries" / f"{image.stem}_Total Summary.csv",
+                image_work_dir / "Histograms" / f"{image.stem}_Char Lengths.csv",
+                image_work_dir / "Histograms" / f"{image.stem}_Pore Data.csv",
+                image_work_dir / "Histograms" / f"{image.stem}_Radius Histo.csv",
+                image_work_dir / "Histograms" / f"{image.stem}_Radius Plot.tif",
+            ]
+            print(f"DiameterJ image {index}/{len(images)}: {image.name}")
+            deadline = time.monotonic() + timeout_per_image
+            try:
+                process = subprocess.Popen(command, stderr=subprocess.DEVNULL)
+                try:
+                    while not all(
                         path.is_file() and path.stat().st_size > 0
                         for path in expected
-                    )
-                    raise TimeoutError(
-                        "DiameterJ analysis timed out after "
-                        f"{timeout_per_image:g} seconds per image "
-                        f"({completed}/{len(expected)} expected result files completed)"
-                    )
-                time.sleep(0.5)
-            # Allow the final save operation to flush before stopping the idle GUI.
-            time.sleep(2.0)
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                    ):
+                        returncode = process.poll()
+                        if returncode is not None:
+                            if returncode:
+                                raise subprocess.CalledProcessError(returncode, command)
+                            break
+                        if time.monotonic() >= deadline:
+                            completed = sum(
+                                path.is_file() and path.stat().st_size > 0
+                                for path in expected
+                            )
+                            raise TimeoutError(
+                                f"timed out after {timeout_per_image:g} seconds "
+                                f"({completed}/{len(expected)} expected result files completed)"
+                            )
+                        time.sleep(0.5)
+                    # Allow the final save operation to flush before stopping Fiji.
+                    time.sleep(2.0)
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
 
-        missing = [
-            path.relative_to(work_dir).as_posix()
-            for path in expected
-            if not path.is_file() or path.stat().st_size == 0
-        ]
-        if missing:
+                missing = [
+                    path.relative_to(image_work_dir).as_posix()
+                    for path in expected
+                    if not path.is_file() or path.stat().st_size == 0
+                ]
+                if missing:
+                    raise RuntimeError(
+                        "finished without producing: " + ", ".join(missing)
+                    )
+                for result in expected:
+                    result.replace(input_dir / result.name)
+                completed_images += 1
+            except (subprocess.CalledProcessError, TimeoutError, RuntimeError) as error:
+                failure = f"{image.name}: {error}"
+                failed_images.append(failure)
+                print(f"WARNING: DiameterJ skipped {failure}", file=sys.stderr)
+
+        if completed_images == 0:
             raise RuntimeError(
-                "DiameterJ finished without producing: " + ", ".join(missing)
+                "DiameterJ failed for every selected segmentation image: "
+                + "; ".join(failed_images)
             )
-        for category in ("Diameter Analysis Images", "Histograms", "Summaries"):
-            category_dir = work_dir / category
-            if category_dir.is_dir():
-                for result in category_dir.iterdir():
-                    if result.is_file():
-                        result.replace(input_dir / result.name)
+        if failed_images:
+            print(
+                f"DiameterJ completed {completed_images}/{len(images)} image(s); "
+                f"skipped {len(failed_images)} failed image(s)",
+                file=sys.stderr,
+            )
+
         print(f"DiameterJ results: {input_dir.resolve()}")
         return input_dir
     finally:

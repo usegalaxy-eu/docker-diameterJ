@@ -373,7 +373,7 @@ def run_fiji_segmentation(
                 command,
                 check=True,
                 stderr=subprocess.DEVNULL,
-                timeout=float(os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "600")),
+                timeout=float(os.environ.get("DIAMETERJ_TIMEOUT_SECONDS", "1200")),
             )
         except subprocess.TimeoutExpired as error:
             raise TimeoutError("Fiji segmentation timed out") from error

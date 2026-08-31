@@ -151,10 +151,13 @@ one-pass SRM Auto Thresholding together.
   without a GUI.
 
 The Fiji/DiameterJ safety timeout defaults to 600 seconds (10 minutes) per
-segmentation image. The total batch budget scales with the number of selected
-threshold methods, and completed jobs return immediately. Override the
-per-image budget with the `DIAMETERJ_TIMEOUT_SECONDS` container environment
-variable when unusually large images require more time.
+segmentation image. Each mask is analyzed in an isolated Fiji process so legacy
+DiameterJ state from one threshold candidate cannot stall a later candidate.
+Completed results are retained as the batch progresses, while a candidate that
+times out or produces incomplete DiameterJ output is skipped with a warning. The
+job fails only if every selected candidate fails. Override the per-image budget
+with the `DIAMETERJ_TIMEOUT_SECONDS` container environment variable when
+unusually large images require more time.
 
 Calibration is recorded in `qc_summary.csv` and used for QC
 diameters. DiameterJ v1.018 runs in its validated native-pixel mode; use the
